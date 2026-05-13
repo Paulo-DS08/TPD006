@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Sistema de Inventario Real-Time</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+</head>
+<body class="bg-light">
+
+<div class="container mt-4">
+    <div id="loginDiv" class="row justify-content-center">
+        <div class="col-md-4">
+            <div class="card shadow">
+                <div class="card-header text-center bg-primary text-white"><h4>📦 Inventario Login</h4></div>
+                <div class="card-body">
+                    <input type="text" id="user" class="form-control mb-3" placeholder="Usuario">
+                    <input type="password" id="pass" class="form-control mb-3" placeholder="Contraseña">
+                    <button class="btn btn-primary w-100" onclick="login()">Ingresar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="app" style="display:none;">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h3>Gestión de Inventario (BODEGA)</h3>
+            <div>
+                <button class="btn btn-primary btn-sm" onclick="abrirModalProducto()">+ Nuevo Producto</button>
+                <button class="btn btn-outline-danger btn-sm" onclick="location.reload()">Salir</button>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-8">
+                <div class="card shadow">
+                    <div class="card-header bg-dark text-white d-flex justify-content-between">
+                        <span>Productos y Saldos</span>
+                    </div>
+                    <div class="card-body">
+                        <table class="table table-hover">
+                            <thead class="table-dark">
+                            <tr>
+                                <th>ID</th>
+                                <th>Nombre</th>
+                                <th>Precio</th>
+                                <th>Saldo</th>
+                                <th>Acciones</th>
+                            </tr>
+                            </thead>
+                            <tbody id="tablaProductos"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <div class="card shadow">
+                    <div class="card-header bg-success text-white"><h5>Registrar Movimiento</h5></div>
+                    <div class="card-body">
+                        <input type="number" id="movProdId" class="form-control mb-2" placeholder="ID Producto">
+                        <select id="movTipo" class="form-select mb-2">
+                            <option value="1"> (+)</option>
+                            <option value="0"> (-)</option>
+                        </select>
+                        <input type="number" id="movCant" class="form-control mb-3" placeholder="Cantidad" min="0">
+                        <button class="btn btn-success w-100" onclick="registrarMovimiento()">Aplicar al Kardex</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="modalProducto" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title" id="modalTitulo">Producto</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="prodId">
+                <label>Nombre del Producto</label>
+                <input type="text" id="prodNombre" class="form-control mb-2">
+                <label>Precio Unitario</label>
+                <input type="number" id="prodPrecio" class="form-control mb-2" step="0.01" min="0">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">Cerrar</button>
+                <button class="btn btn-primary" onclick="guardarProducto()">Guardar</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="alerta" class="position-fixed top-0 end-0 p-3" style="z-index:9999;"></div>
+
+<script>
+    const URL = "https://bodega.aprobaos.store";
+    let modalProd = null;
+
+    window.onload = () => {
+        modalProd = new bootstrap.Modal(document.getElementById('modalProducto'));
+    };
+
+
+        // Bloquear teclas negativas y notación científica
+    document.addEventListener("keypress", function(e) {
+        if (e.target.type === 'number') {
+            if (e.key === '-' || e.key === 'e' || e.key === 'E') {
+                e.preventDefault();
+            }
+        }
+    });
+
+    // Evitar que peguen texto con signo negativo
+    document.addEventListener("paste", function(e) {
+        if (e.target.type === 'number') {
+            const data = e.clipboardData.getData('text');
+            if (data.includes('-')) {
+                e.preventDefault();
+                alert("No se permiten valores negativos");
+            }
+        }
+    });
+
+
+
+    function mostrarAlerta(msg, tipo="success") {
+        document.getElementById("alerta").innerHTML = `<div class="alert alert-${tipo} alert-dismissible fade show shadow">${msg}<button class="btn-close" data-bs-dismiss="alert"></button></div>`;
+    }
+
+    // LOGIN
+    function login() {
+        const data = { user: document.getElementById("user").value, pass: document.getElementById("pass").value };
+        fetch(URL + "/api/usuarios/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) })
+        .then(res => res.json()).then(resp => {
+            if (resp.codiUsua) {
+                document.getElementById("loginDiv").style.display = "none";
+                document.getElementById("app").style.display = "block";
+                listarProductos();
+                conectarWebSocket();
+            } else { mostrarAlerta("Error", "danger"); }
+        });
+    }
+
+    // --- CRUD PRODUCTO ---
+    async function listarProductos() {
+    const res = await fetch(URL + "/api/inventario/productos");
+    const data = await res.json();
+
+    let html = "";
+    for (const p of data) {
+        // Pedimos el saldo actual al servidor para cada producto
+        const resSaldo = await fetch(`${URL}/api/inventario/productos/saldo/${p.codiProd}`);
+        const saldoActual = await resSaldo.json();
+
+        html += `<tr>
+            <td>${p.codiProd}</td>
+            <td>${p.nombProd}</td>
+            <td>S/. ${p.precProd}</td>
+            <td id="saldo-${p.codiProd}" class="fw-bold text-primary">${saldoActual}</td>
+            <td>
+                <button class="btn btn-warning btn-sm" onclick="editarProducto(${p.codiProd}, '${p.nombProd}', ${p.precProd})">✏️</button>
+                <button class="btn btn-danger btn-sm" onclick="eliminarProducto(${p.codiProd})">🗑️</button>
+            </td>
+        </tr>`;
+    }
+    document.getElementById("tablaProductos").innerHTML = html;
+}
+
+    function abrirModalProducto() {
+        document.getElementById("prodId").value = "";
+        document.getElementById("prodNombre").value = "";
+        document.getElementById("prodPrecio").value = "";
+        document.getElementById("modalTitulo").innerText = "Nuevo Producto";
+        modalProd.show();
+    }
+
+    function guardarProducto() {
+    const precio = document.getElementById("prodPrecio").value;
+
+    if (precio < 0) {
+        mostrarAlerta("El precio no puede ser negativo", "danger");
+        return;
+    }
+    const id = document.getElementById("prodId").value; // Capturamos el ID del input hidden
+
+    const prod = {
+        nombProd: document.getElementById("prodNombre").value,
+        precProd: document.getElementById("prodPrecio").value
+    };
+
+    // SI EL ID EXISTE, LO AGREGAMOS AL OBJETO
+    if (id) {
+        prod.codiProd = parseInt(id);
+    }
+
+    fetch(URL + "/api/inventario/productos", {
+        method: "POST", // El .save() de Spring maneja ambos
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(prod)
+    }).then(() => {
+        listarProductos();
+        modalProd.hide();
+        mostrarAlerta(id ? "Producto actualizado" : "Producto creado");
+    });
+}
+
+    function editarProducto(id, nombre, precio) {
+        document.getElementById("prodId").value = id;
+        document.getElementById("prodNombre").value = nombre;
+        document.getElementById("prodPrecio").value = precio;
+        document.getElementById("modalTitulo").innerText = "Editar Producto";
+        modalProd.show();
+    }
+
+    function eliminarProducto(id) {
+        if(!confirm("¿Eliminar producto?")) return;
+        // Debes añadir un @DeleteMapping en tu InventarioController para que esto funcione
+        fetch(URL + "/api/inventario/productos/" + id, { method: "DELETE" })
+        .then(() => {
+            listarProductos();
+            mostrarAlerta("Producto eliminado", "warning");
+        });
+    }
+
+    // --- KARDEX & WEBSOCKET ---
+    function conectarWebSocket() {
+        const socket = new SockJS(URL + '/ws-inventario');
+        const stompClient = Stomp.over(socket);
+        stompClient.connect({}, (frame) => {
+            stompClient.subscribe('/topic/saldos', (mensaje) => {
+                const mov = JSON.parse(mensaje.body);
+                const celda = document.getElementById(`saldo-${mov.producto.codiProd}`);
+                if(celda) celda.innerText = mov.saldProd;
+            });
+        });
+    }
+
+    function registrarMovimiento() {
+    const idProd = document.getElementById("movProdId").value;
+    const tipo = document.getElementById("movTipo").value;
+    const cant = parseInt(document.getElementById("movCant").value);
+    const celdaSaldo = document.getElementById(`saldo-${idProd}`);
+    const saldoActual = celdaSaldo ? parseInt(celdaSaldo.innerText) : 0;
+
+    // 1. Validar que la cantidad sea positiva
+    if (cant <= 0) {
+        mostrarAlerta("La cantidad debe ser mayor a 0", "danger");
+        return;
+    }
+
+    // 2. Validar Stock suficiente si es Salida (tipo 0)
+    if (tipo == "0" && cant > saldoActual) {
+        mostrarAlerta("Stock insuficiente para realizar la salida", "danger");
+        return;
+    }
+
+    const mov = {
+        tipoOper: tipo,
+        producto: { codiProd: idProd },
+        cantProd: cant
+    };
+
+    fetch(URL + "/api/inventario/movimiento", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mov)
+    })
+    .then(() => {
+        mostrarAlerta("Movimiento registrado");
+        document.getElementById("movCant").value = "";
+    });
+}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
